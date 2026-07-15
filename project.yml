@@ -28,6 +28,10 @@ targets:
         WRAPPER_EXTENSION: saver
         INFOPLIST_FILE: Sources/Info.plist
         GENERATE_INFOPLIST_FILE: NO
+        # Overridden at build time from version.txt by CI (release.yml) and the
+        # Makefile — version.txt is the single source of truth for the version.
+        # This value is only the fallback for a raw `xcodebuild` without the
+        # MARKETING_VERSION override; keep it lax rather than hand-syncing it.
         MARKETING_VERSION: 0.1.0
         CURRENT_PROJECT_VERSION: 1
         SWIFT_VERSION: "6.0"
