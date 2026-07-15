@@ -1,4 +1,6 @@
 import AVFoundation
+import Darwin
+import Foundation
 import LyraKit
 import ScreenSaver
 import os
@@ -68,8 +70,9 @@ private extension LyraScreenSaverView {
     /// instance the presenter keeps across item swaps, and track per-item zoom.
     func bindPresenter() {
         presenter.onPlayerAvailable { [weak self] player in
-            let url = (player.currentItem?.asset as? AVURLAsset)?.url.path ?? "(no item yet)"
-            Self.log.info("player available; currentItem=\(url, privacy: .public)")
+            // Log only the cache filename, never the full ~/.cache path (username PII).
+            let item = (player.currentItem?.asset as? AVURLAsset)?.url.lastPathComponent ?? "(no item yet)"
+            Self.log.info("player available; item=\(item, privacy: .public)")
             self?.playerLayer.player = player
         }
         presenter.onWallpaperScaleChange { [weak self] scale in
@@ -107,7 +110,8 @@ private extension LyraScreenSaverView {
         let realHome = String(cString: dir)
         setenv("XDG_CONFIG_HOME", realHome + "/.config", 1)
         setenv("XDG_CACHE_HOME", realHome + "/.cache", 1)
-        log.info("real home resolved: \(realHome, privacy: .public)")
+        // The resolved path carries the username; log only that the redirect ran.
+        log.info("real home resolved via getpwuid; XDG redirect applied")
         probeReadability(realHome: realHome)
     }
 
@@ -116,18 +120,25 @@ private extension LyraScreenSaverView {
     /// how paths resolve — the fix then needs a sandbox entitlement, not just the
     /// XDG redirect above. These log lines make that verdict visible in
     /// Console.app / `log show --predicate 'subsystem == "com.generald.lyra-screensaver"'`.
+    /// Log only non-PII facts (readable? size?) — never the username-bearing path.
     static func probeReadability(realHome: String) {
+        // Actually read the config (~1.4 KB): a real read is the authoritative
+        // test of whether the sandbox permits reads under the real home —
+        // access()-style checks don't exercise the sandbox read path. It's tiny,
+        // so the read cost is negligible.
         let config = realHome + "/.config/lyra/config.toml"
         if let data = FileManager.default.contents(atPath: config) {
             log.info("config readable: \(data.count, privacy: .public) bytes")
         } else {
-            log.error("config NOT readable at \(config, privacy: .public) — sandbox deny or missing")
+            log.error("config NOT readable (~/.config/lyra/config.toml) — sandbox deny or missing")
         }
+        // The cache holds a large mp4; check readability without reading it or
+        // enumerating the directory. The config read above is the primary verdict.
         let cache = realHome + "/.cache/lyra/wallpapers"
-        if let entries = try? FileManager.default.contentsOfDirectory(atPath: cache) {
-            log.info("wallpaper cache readable: \(entries.count, privacy: .public) entries")
+        if FileManager.default.isReadableFile(atPath: cache) {
+            log.info("wallpaper cache readable")
         } else {
-            log.error("wallpaper cache NOT readable at \(cache, privacy: .public) — sandbox deny or missing")
+            log.error("wallpaper cache NOT readable (~/.cache/lyra/wallpapers) — sandbox deny or missing")
         }
     }
 }
