@@ -1,0 +1,18 @@
+# macOS
+.DS_Store
+
+# XcodeGen output — the project is generated from project.yml, never committed
+*.xcodeproj
+
+# Build products
+build/
+DerivedData/
+*.saver
+*.zip
+
+# SwiftPM
+.build/
+.swiftpm/
+
+# Xcode user state
+xcuserdata/

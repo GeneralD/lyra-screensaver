@@ -1,0 +1,61 @@
+name: LyraScreenSaver
+options:
+  bundleIdPrefix: com.generald
+  deploymentTarget:
+    macOS: "14.0"
+  createIntermediateGroups: true
+
+packages:
+  Lyra:
+    url: https://github.com/GeneralD/lyra.git
+    from: "2.22.0"
+
+targets:
+  LyraScreenSaver:
+    type: bundle
+    platform: macOS
+    sources:
+      - path: Sources
+    dependencies:
+      - package: Lyra
+        product: LyraKit
+      - sdk: ScreenSaver.framework
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.generald.LyraScreenSaver
+        PRODUCT_NAME: LyraScreenSaver
+        PRODUCT_MODULE_NAME: LyraScreenSaver
+        WRAPPER_EXTENSION: saver
+        INFOPLIST_FILE: Sources/Info.plist
+        GENERATE_INFOPLIST_FILE: NO
+        MARKETING_VERSION: 0.1.0
+        CURRENT_PROJECT_VERSION: 1
+        SWIFT_VERSION: "6.0"
+        MACOSX_DEPLOYMENT_TARGET: "14.0"
+        # Ad-hoc sign locally without a team; CI packages unsigned (see release.yml).
+        CODE_SIGN_STYLE: Manual
+        CODE_SIGN_IDENTITY: "-"
+        CODE_SIGNING_REQUIRED: NO
+        COMBINE_HIDPI_IMAGES: YES
+        SKIP_INSTALL: YES
+        LD_RUNPATH_SEARCH_PATHS:
+          - "@loader_path/../Frameworks"
+          - "@executable_path/../Frameworks"
+        # NOTE: EXPLICIT_BUILT_MODULES / SWIFT_ENABLE_EXPLICIT_MODULES are
+        # deliberately NOT set here. A per-target setting on THIS target
+        # does not propagate to the separate SwiftPM "sub-project" package
+        # targets (combine-schedulers, swift-clocks, ...) that Xcode
+        # builds alongside it — verified empirically (a project.yml
+        # setting here had no effect, while the same flag passed as a
+        # global `xcodebuild` argument did). See Makefile / release.yml
+        # for the actual workaround, passed at the xcodebuild invocation.
+
+schemes:
+  LyraScreenSaver:
+    build:
+      targets:
+        LyraScreenSaver: all
+    run:
+      config: Release
+    archive:
+      config: Release

@@ -1,0 +1,162 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read version
+        id: version
+        run: |
+          VERSION=$(cat version.txt | tr -d '[:space:]')
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Invalid version format: $VERSION"
+            exit 1
+          fi
+          TAG="v$VERSION"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Version: $VERSION, Tag: $TAG"
+
+      - name: Check if tag exists
+        id: tag_check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ steps.version.outputs.tag }}"
+          if gh api "repos/${{ github.repository }}/git/refs/tags/$TAG" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create tag
+        if: steps.tag_check.outputs.exists == 'false'
+        run: |
+          TAG="${{ steps.version.outputs.tag }}"
+          git tag "$TAG"
+          git push origin "$TAG"
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      - name: Build
+        # EXPLICIT_BUILT_MODULES/SWIFT_ENABLE_EXPLICIT_MODULES=NO: works
+        # around a known, still-open Xcode 26 beta "Explicitly Built
+        # Modules" bug (Swift Forums: "Xcode 26: Unable to find module
+        # dependency") that surfaced locally as combine-schedulers (a
+        # transitive SPM dep via LyraKit) failing to resolve its own
+        # ConcurrencyExtras/IssueReporting deps. Must be a global
+        # xcodebuild argument, not a project.yml per-target setting — see
+        # Makefile for the fuller comment. This runner's Xcode (macos-15
+        # image) is expected to be a stable release, likely unaffected;
+        # these flags are harmless no-ops there either way.
+        run: |
+          xcodebuild -project LyraScreenSaver.xcodeproj \
+            -scheme LyraScreenSaver \
+            -configuration Release \
+            -skipMacroValidation \
+            build \
+            SYMROOT=build \
+            CODE_SIGNING_ALLOWED=NO \
+            MACOSX_DEPLOYMENT_TARGET=14.0 \
+            EXPLICIT_BUILT_MODULES=NO \
+            SWIFT_ENABLE_EXPLICIT_MODULES=NO
+
+      - name: Package
+        id: package
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          ARCHIVE="LyraScreenSaver-${VERSION}.zip"
+          ditto -c -k --sequesterRsrc --keepParent build/Release/LyraScreenSaver.saver "$ARCHIVE"
+          SHA=$(shasum -a 256 "$ARCHIVE" | awk '{print $1}')
+          echo "archive=$ARCHIVE" >> "$GITHUB_OUTPUT"
+          echo "sha256=$SHA" >> "$GITHUB_OUTPUT"
+          echo "SHA256: $SHA"
+
+      - name: Create release
+        if: steps.tag_check.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ steps.version.outputs.tag }}"
+          gh release create "$TAG" \
+            "${{ steps.package.outputs.archive }}" \
+            --title "$TAG" \
+            --generate-notes
+
+      - name: Upload to existing release
+        if: steps.tag_check.outputs.exists == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ steps.version.outputs.tag }}"
+          gh release upload "$TAG" "${{ steps.package.outputs.archive }}" --clobber 2>/dev/null || true
+
+      - name: Update Homebrew cask
+        uses: actions/github-script@v7
+        env:
+          HOMEBREW_PAT: ${{ secrets.HOMEBREW_PAT }}
+          CASK_VERSION: ${{ steps.version.outputs.version }}
+          CASK_TAG: ${{ steps.version.outputs.tag }}
+          CASK_SHA256: ${{ steps.package.outputs.sha256 }}
+        with:
+          github-token: ${{ secrets.HOMEBREW_PAT }}
+          script: |
+            const version = process.env.CASK_VERSION;
+            const tag = process.env.CASK_TAG;
+            const sha256 = process.env.CASK_SHA256;
+            const owner = 'GeneralD';
+            const tapRepo = 'homebrew-tap';
+            const caskPath = 'Casks/lyra-screensaver.rb';
+
+            const url = `https://github.com/GeneralD/lyra-screensaver/releases/download/${tag}/LyraScreenSaver-${version}.zip`;
+
+            const caskContent = `cask "lyra-screensaver" do
+              version "${version}"
+              sha256 "${sha256}"
+
+              url "${url}"
+              name "Lyra Screen Saver"
+              desc "macOS screensaver that plays lyra's video wallpaper"
+              homepage "https://github.com/GeneralD/lyra-screensaver"
+
+              depends_on formula: "generald/tap/lyra"
+
+              screen_saver "LyraScreenSaver.saver"
+            end
+            `;
+
+            let existingSha;
+            try {
+              const { data } = await github.rest.repos.getContent({
+                owner, repo: tapRepo, path: caskPath,
+              });
+              existingSha = data.sha;
+            } catch (e) {
+              existingSha = undefined;
+            }
+
+            await github.rest.repos.createOrUpdateFileContents({
+              owner,
+              repo: tapRepo,
+              path: caskPath,
+              message: `Update lyra-screensaver to ${version}`,
+              content: Buffer.from(caskContent).toString('base64'),
+              sha: existingSha,
+              branch: 'master',
+            });
+
+            console.log(`Updated cask to ${version}`);
