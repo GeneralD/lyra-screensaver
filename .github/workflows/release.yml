@@ -22,29 +22,9 @@ jobs:
             echo "::error::Invalid version format: $VERSION"
             exit 1
           fi
-          TAG="v$VERSION"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-          echo "Version: $VERSION, Tag: $TAG"
-
-      - name: Check if tag exists
-        id: tag_check
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          TAG="${{ steps.version.outputs.tag }}"
-          if gh api "repos/${{ github.repository }}/git/refs/tags/$TAG" >/dev/null 2>&1; then
-            echo "exists=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "exists=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Create tag
-        if: steps.tag_check.outputs.exists == 'false'
-        run: |
-          TAG="${{ steps.version.outputs.tag }}"
-          git tag "$TAG"
-          git push origin "$TAG"
+          echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Version: $VERSION"
 
       - name: Install XcodeGen
         run: brew install xcodegen
@@ -53,57 +33,48 @@ jobs:
         run: xcodegen generate
 
       - name: Build
-        # EXPLICIT_BUILT_MODULES/SWIFT_ENABLE_EXPLICIT_MODULES=NO: works
-        # around a known, still-open Xcode 26 beta "Explicitly Built
-        # Modules" bug (Swift Forums: "Xcode 26: Unable to find module
-        # dependency") that surfaced locally as combine-schedulers (a
-        # transitive SPM dep via LyraKit) failing to resolve its own
-        # ConcurrencyExtras/IssueReporting deps. Must be a global
-        # xcodebuild argument, not a project.yml per-target setting — see
-        # Makefile for the fuller comment. This runner's Xcode (macos-15
-        # image) is expected to be a stable release, likely unaffected;
-        # these flags are harmless no-ops there either way.
+        # -derivedDataPath (not SYMROOT): relocating output via SYMROOT desyncs
+        # the inter-package module search paths for SwiftPM deps, so a transitive
+        # dep (combine-schedulers) fails to find its own dep (ConcurrencyExtras)
+        # with "no such module". -derivedDataPath relocates the whole build tree
+        # coherently. -skipMacroValidation trusts lyra's papyrus macro plugin.
         run: |
           xcodebuild -project LyraScreenSaver.xcodeproj \
             -scheme LyraScreenSaver \
             -configuration Release \
             -skipMacroValidation \
+            -derivedDataPath build \
             build \
-            SYMROOT=build \
             CODE_SIGNING_ALLOWED=NO \
-            MACOSX_DEPLOYMENT_TARGET=14.0 \
-            EXPLICIT_BUILT_MODULES=NO \
-            SWIFT_ENABLE_EXPLICIT_MODULES=NO
+            MACOSX_DEPLOYMENT_TARGET=14.0
 
       - name: Package
         id: package
         run: |
           VERSION="${{ steps.version.outputs.version }}"
           ARCHIVE="LyraScreenSaver-${VERSION}.zip"
-          ditto -c -k --sequesterRsrc --keepParent build/Release/LyraScreenSaver.saver "$ARCHIVE"
+          ditto -c -k --sequesterRsrc --keepParent \
+            build/Build/Products/Release/LyraScreenSaver.saver "$ARCHIVE"
           SHA=$(shasum -a 256 "$ARCHIVE" | awk '{print $1}')
           echo "archive=$ARCHIVE" >> "$GITHUB_OUTPUT"
           echo "sha256=$SHA" >> "$GITHUB_OUTPUT"
           echo "SHA256: $SHA"
 
-      - name: Create release
-        if: steps.tag_check.outputs.exists == 'false'
+      - name: Publish release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           TAG="${{ steps.version.outputs.tag }}"
-          gh release create "$TAG" \
-            "${{ steps.package.outputs.archive }}" \
-            --title "$TAG" \
-            --generate-notes
-
-      - name: Upload to existing release
-        if: steps.tag_check.outputs.exists == 'true'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          TAG="${{ steps.version.outputs.tag }}"
-          gh release upload "$TAG" "${{ steps.package.outputs.archive }}" --clobber 2>/dev/null || true
+          ARCHIVE="${{ steps.package.outputs.archive }}"
+          # Tag/release only after a successful build. Force-move the tag to the
+          # built commit so a prior failed run that left it elsewhere self-heals.
+          git tag -f "$TAG"
+          git push -f origin "refs/tags/$TAG"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "$ARCHIVE" --clobber
+          else
+            gh release create "$TAG" "$ARCHIVE" --title "$TAG" --generate-notes
+          fi
 
       - name: Update Homebrew cask
         uses: actions/github-script@v7

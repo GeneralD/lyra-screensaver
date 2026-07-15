@@ -43,14 +43,22 @@ the exact flags the build needs (see "Build gotchas"). CI runs the same flags in
 Linking LyraKit pulls in lyra's full implementation graph (MediaRemote, Audio,
 the pointfree `swift-dependencies` ecosystem), so the screensaver build compiles
 a large chunk of lyra. Two things bite under `xcodebuild` (but not `swift
-build`):
+build`), both handled in the `Makefile` `build:` target and the CI `Build` step
+(keep those two in sync):
 
 - **Swift macros must be trusted non-interactively** → `-skipMacroValidation`
   (lyra transitively uses the `papyrus` macro plugin).
-- **Pointfree package module resolution** — the exact flag combination that
-  makes `combine-schedulers` / `swift-clocks` resolve `ConcurrencyExtras` /
-  `IssueReporting` lives in the `Makefile` `build:` target and the CI `Build`
-  step. Keep those two in sync.
+- **Relocate output with `-derivedDataPath`, never `SYMROOT`.** `SYMROOT=build`
+  desyncs the inter-package module search paths, so a transitive SwiftPM dep
+  (`combine-schedulers`) fails to find its own dep (`ConcurrencyExtras`) with
+  `no such module`. `-derivedDataPath build` relocates the whole build tree
+  coherently; the `.saver` then lives at `build/Build/Products/Release/`.
+
+Do **not** re-add `EXPLICIT_BUILT_MODULES=NO` / `SWIFT_ENABLE_EXPLICIT_MODULES=NO`
+— disabling explicitly-built modules is what *caused* the `no such module`
+failure on stable Xcode 16.4. (Xcode 26 betas carry a separate, still-open
+"Explicitly Built Modules" bug that breaks this build locally regardless — build
+on a stable Xcode, or wait for the fix.)
 
 There is no unit-test target: all display logic is a thin map onto lyra's
 already-tested `WallpaperPresenter`. Verification is a manual on-device smoke

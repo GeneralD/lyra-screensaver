@@ -1,7 +1,8 @@
 PROJECT := LyraScreenSaver.xcodeproj
 TARGET  := LyraScreenSaver
 CONFIG  := Release
-SAVER   := build/$(CONFIG)/$(TARGET).saver
+DERIVED := build
+SAVER   := $(DERIVED)/Build/Products/$(CONFIG)/$(TARGET).saver
 INSTALL_DIR := $(HOME)/Library/Screen Savers
 
 .PHONY: generate build install uninstall clean
@@ -10,19 +11,14 @@ generate: ## Generate the Xcode project from project.yml
 	xcodegen generate
 
 build: generate ## Build the .saver bundle
-	# EXPLICIT_BUILT_MODULES/SWIFT_ENABLE_EXPLICIT_MODULES=NO: works around
-	# a known, still-open Xcode 26 beta "Explicitly Built Modules" bug
-	# (Swift Forums: "Xcode 26: Unable to find module dependency"). MUST be
-	# passed as a global xcodebuild argument, not a project.yml per-target
-	# setting — a per-target setting does not propagate to the separate
-	# SwiftPM package sub-project targets (combine-schedulers, swift-clocks)
-	# that also need it; verified empirically. Harmless no-op on older/
-	# stable Xcode toolchains.
+	# -derivedDataPath (not SYMROOT): relocating output via SYMROOT desyncs the
+	# inter-package module search paths for SwiftPM deps, so a transitive dep
+	# (e.g. combine-schedulers) fails to find its own dep (ConcurrencyExtras).
+	# -derivedDataPath relocates the whole build tree coherently instead.
+	# -skipMacroValidation trusts lyra's papyrus macro plugin non-interactively.
 	xcodebuild -project $(PROJECT) -scheme $(TARGET) -configuration $(CONFIG) \
-		-skipMacroValidation build SYMROOT=build \
-		MACOSX_DEPLOYMENT_TARGET=14.0 \
-		EXPLICIT_BUILT_MODULES=NO \
-		SWIFT_ENABLE_EXPLICIT_MODULES=NO
+		-skipMacroValidation -derivedDataPath $(DERIVED) build \
+		MACOSX_DEPLOYMENT_TARGET=14.0
 
 install: build ## Build then install into ~/Library/Screen Savers
 	rm -rf "$(INSTALL_DIR)/$(TARGET).saver"
@@ -34,4 +30,4 @@ uninstall: ## Remove the installed .saver
 	rm -rf "$(INSTALL_DIR)/$(TARGET).saver"
 
 clean: ## Remove build artifacts and the generated project
-	rm -rf build $(PROJECT)
+	rm -rf $(DERIVED) $(PROJECT)
