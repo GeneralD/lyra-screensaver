@@ -31,6 +31,8 @@ so this one sidesteps it entirely:
   daemon already downloads and maintains (local files, HTTP(S), and YouTube
   sources are resolved and cached by lyra).
 
+<a href="https://github.com/GeneralD/lyra/blob/main/docs/LyraKit.md"><img src="assets/lyrakit-logo.png" align="right" width="88" alt="LyraKit"></a>
+
 Playback is driven by lyra's own `WallpaperPresenter`, imported through the
 [`LyraKit`](https://github.com/GeneralD/lyra/blob/main/docs/LyraKit.md) library
 product, so framing (aspect-fill, per-item zoom, cycle / shuffle advance) matches
