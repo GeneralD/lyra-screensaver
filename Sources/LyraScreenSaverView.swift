@@ -108,37 +108,48 @@ private extension LyraScreenSaverView {
             return
         }
         let realHome = String(cString: dir)
-        setenv("XDG_CONFIG_HOME", realHome + "/.config", 1)
-        setenv("XDG_CACHE_HOME", realHome + "/.cache", 1)
+        // overwrite=0: only synthesize the real-home default when the var is
+        // unset. If the user exported XDG_CONFIG_HOME / XDG_CACHE_HOME into the
+        // GUI session, lyra reads those first — respect them rather than
+        // clobbering with ~/.config, which would make the saver ignore the very
+        // config lyra is using (and could leave the screen black).
+        setenv("XDG_CONFIG_HOME", realHome + "/.config", 0)
+        setenv("XDG_CACHE_HOME", realHome + "/.cache", 0)
         // The resolved path carries the username; log only that the redirect ran.
         log.info("real home resolved via getpwuid; XDG redirect applied")
-        probeReadability(realHome: realHome)
+        probeReadability()
     }
 
-    /// One-shot sandbox read probe. If the config file or wallpaper cache is not
-    /// readable from inside the saver's sandbox, the screen stays black no matter
-    /// how paths resolve — the fix then needs a sandbox entitlement, not just the
-    /// XDG redirect above. These log lines make that verdict visible in
-    /// Console.app / `log show --predicate 'subsystem == "com.generald.lyra-screensaver"'`.
-    /// Log only non-PII facts (readable? size?) — never the username-bearing path.
-    static func probeReadability(realHome: String) {
+    /// One-shot sandbox read probe against the EFFECTIVE XDG locations lyra will
+    /// use — the real-home defaults, or the user's exported overrides. If the
+    /// config or cache is not readable from inside the saver's sandbox, the
+    /// screen stays black no matter how paths resolve — the fix then needs a
+    /// sandbox entitlement, not just the XDG redirect above. These log lines make
+    /// that verdict visible in Console.app / `log show --predicate
+    /// 'subsystem == "com.generald.lyra-screensaver"'`. Log only non-PII facts
+    /// (readable? size?) — never the username-bearing path.
+    static func probeReadability() {
         // Actually read the config (~1.4 KB): a real read is the authoritative
-        // test of whether the sandbox permits reads under the real home —
-        // access()-style checks don't exercise the sandbox read path. It's tiny,
-        // so the read cost is negligible.
-        let config = realHome + "/.config/lyra/config.toml"
-        if let data = FileManager.default.contents(atPath: config) {
-            log.info("config readable: \(data.count, privacy: .public) bytes")
-        } else {
-            log.error("config NOT readable (~/.config/lyra/config.toml) — sandbox deny or missing")
+        // test of whether the sandbox permits reads at lyra's config location —
+        // access()-style checks don't exercise the sandbox read path, and it's
+        // tiny so the cost is negligible.
+        if let configHome = getenv("XDG_CONFIG_HOME").map({ String(cString: $0) }) {
+            let config = configHome + "/lyra/config.toml"
+            if let data = FileManager.default.contents(atPath: config) {
+                log.info("config readable: \(data.count, privacy: .public) bytes")
+            } else {
+                log.error("config NOT readable (XDG_CONFIG_HOME/lyra/config.toml) — sandbox deny or missing")
+            }
         }
         // The cache holds a large mp4; check readability without reading it or
         // enumerating the directory. The config read above is the primary verdict.
-        let cache = realHome + "/.cache/lyra/wallpapers"
-        if FileManager.default.isReadableFile(atPath: cache) {
-            log.info("wallpaper cache readable")
-        } else {
-            log.error("wallpaper cache NOT readable (~/.cache/lyra/wallpapers) — sandbox deny or missing")
+        if let cacheHome = getenv("XDG_CACHE_HOME").map({ String(cString: $0) }) {
+            let cache = cacheHome + "/lyra/wallpapers"
+            if FileManager.default.isReadableFile(atPath: cache) {
+                log.info("wallpaper cache readable")
+            } else {
+                log.error("wallpaper cache NOT readable (XDG_CACHE_HOME/lyra/wallpapers) — sandbox deny or missing")
+            }
         }
     }
 }

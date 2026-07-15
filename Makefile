@@ -1,6 +1,9 @@
 PROJECT := LyraScreenSaver.xcodeproj
 TARGET  := LyraScreenSaver
 CONFIG  := Release
+# version.txt is the single source of truth; inject it as the bundle's
+# CFBundleShortVersionString ($(MARKETING_VERSION)) so a local build matches CI.
+VERSION := $(shell tr -d '[:space:]' < version.txt)
 DERIVED := build
 SAVER   := $(DERIVED)/Build/Products/$(CONFIG)/$(TARGET).saver
 INSTALL_DIR := $(HOME)/Library/Screen Savers
@@ -18,7 +21,7 @@ build: generate ## Build the .saver bundle
 	# -skipMacroValidation trusts lyra's papyrus macro plugin non-interactively.
 	xcodebuild -project $(PROJECT) -scheme $(TARGET) -configuration $(CONFIG) \
 		-skipMacroValidation -derivedDataPath $(DERIVED) build \
-		MACOSX_DEPLOYMENT_TARGET=14.0
+		MACOSX_DEPLOYMENT_TARGET=14.0 MARKETING_VERSION=$(VERSION)
 
 install: build ## Build then install into ~/Library/Screen Savers
 	rm -rf "$(INSTALL_DIR)/$(TARGET).saver"
