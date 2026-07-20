@@ -43,8 +43,22 @@ final class LyraScreenSaverView: ScreenSaverView {
     }
 
     override func stopAnimation() {
+        Self.log.info("stopAnimation: stopping presenter")
         presenter.stop()
         super.stopAnimation()
+        Self.log.info("stopAnimation: done")
+    }
+
+    /// `legacyScreenSaver` may keep the view alive without calling
+    /// `stopAnimation()`. Observe window attachment as a fallback signal.
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        let animating = isAnimating ? 1 : 0
+        if window == nil {
+            Self.log.info("viewDidMoveToWindow: window is nil -- view detached; isAnimating=\(animating, privacy: .public)")
+        } else {
+            Self.log.info("viewDidMoveToWindow: window attached; isAnimating=\(animating, privacy: .public)")
+        }
     }
 
     override func layout() {
