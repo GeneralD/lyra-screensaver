@@ -24,11 +24,19 @@ final class LyraScreenSaverView: ScreenSaverView {
     private lazy var presenter = WallpaperPresenter()
     private let playerLayer = AVPlayerLayer()
 
+    /// Guards `startPresenting()` / `stopPresenting()` so the presenter is
+    /// started and torn down at most once per cycle. `legacyScreenSaver` can
+    /// deliver overlapping lifecycle callbacks, and our `viewDidMoveToWindow`
+    /// fallback races `stopAnimation()`, so both transitions must be idempotent.
+    private var isPresenting = false
+
     override init?(frame: NSRect, isPreview: Bool) {
         Self.redirectXDGToRealHome()
         super.init(frame: frame, isPreview: isPreview)
         configureLayerHierarchy()
-        bindPresenter()
+        // Presenter binding is deferred to startPresenting() so it re-subscribes
+        // on every start (stop() clears the presenter's subscriptions), keeping
+        // resume after a fallback teardown working.
     }
 
     @available(*, unavailable)
@@ -38,27 +46,25 @@ final class LyraScreenSaverView: ScreenSaverView {
 
     override func startAnimation() {
         super.startAnimation()
-        Self.log.info("startAnimation: starting presenter")
-        presenter.start()
+        startPresenting()
     }
 
     override func stopAnimation() {
-        Self.log.info("stopAnimation: stopping presenter")
-        presenter.stop()
+        stopPresenting(trigger: "stopAnimation")
         super.stopAnimation()
-        Self.log.info("stopAnimation: done")
     }
 
-    /// `legacyScreenSaver` may keep the view alive without calling
-    /// `stopAnimation()`. Observe window attachment as a fallback signal.
+    /// `legacyScreenSaver` frequently keeps the view alive on dismissal without
+    /// calling `stopAnimation()`, leaving the presenter (and its video decoder)
+    /// running indefinitely — the root cause of issue #2. Detaching from the
+    /// window is the reliable dismissal signal, so tear down here as a fallback.
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
-        let animating = isAnimating ? 1 : 0
-        if window == nil {
-            Self.log.info("viewDidMoveToWindow: window is nil -- view detached; isAnimating=\(animating, privacy: .public)")
-        } else {
-            Self.log.info("viewDidMoveToWindow: window attached; isAnimating=\(animating, privacy: .public)")
+        guard window == nil else {
+            Self.log.info("viewDidMoveToWindow: window attached")
+            return
         }
+        stopPresenting(trigger: "viewDidMoveToWindow")
     }
 
     override func layout() {
@@ -72,6 +78,30 @@ final class LyraScreenSaverView: ScreenSaverView {
 }
 
 private extension LyraScreenSaverView {
+    /// Idempotent start: (re)subscribe the presenter callbacks and begin
+    /// playback. Safe to call repeatedly — the `isPresenting` guard collapses
+    /// duplicate host callbacks, and rebinding is required because a prior
+    /// `stopPresenting()` cleared the presenter's subscriptions.
+    func startPresenting() {
+        guard !isPresenting else { return }
+        isPresenting = true
+        Self.log.info("startPresenting: binding + starting presenter")
+        bindPresenter()
+        presenter.start()
+    }
+
+    /// Idempotent teardown. Beyond stopping the presenter (which nils out its
+    /// own AVPlayer), detach the player from the layer: the layer holds the only
+    /// remaining strong reference to the presenter's AVPlayer, so without this
+    /// the instance — and its warm video decoder — survives the stop (issue #2).
+    func stopPresenting(trigger: String) {
+        guard isPresenting else { return }
+        isPresenting = false
+        Self.log.info("stopPresenting(\(trigger, privacy: .public)): stopping presenter + detaching player layer")
+        presenter.stop()
+        playerLayer.player = nil
+    }
+
     func configureLayerHierarchy() {
         wantsLayer = true
         layer?.backgroundColor = NSColor.black.cgColor
