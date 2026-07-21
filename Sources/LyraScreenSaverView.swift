@@ -76,6 +76,10 @@ final class LyraScreenSaverView: ScreenSaverView {
             return
         }
         observeOcclusion(on: window)
+        // Reattach (AppKit reparenting / view reuse) is not always followed by
+        // another startAnimation(); restart here so a reused view doesn't come
+        // back attached but black. Idempotent, so it no-ops during a normal start.
+        startPresenting()
     }
 
     // AVPlayerLayer self-renders; the ScreenSaver frame tick does nothing.
@@ -157,8 +161,10 @@ private extension LyraScreenSaverView {
         layer?.addSublayer(playerLayer)
     }
 
-    /// Mirrors lyra's `AppWindow`: register once, attach the stable `AVPlayer`
-    /// instance the presenter keeps across item swaps, and track per-item zoom.
+    /// Mirrors lyra's `AppWindow`: attach the stable `AVPlayer` instance the
+    /// presenter keeps across item swaps, and track per-item zoom. Re-registered
+    /// on every `startPresenting()` — `stopPresenting()` clears the presenter's
+    /// subscriptions, so a fresh binding is needed to resume after a teardown.
     func bindPresenter() {
         presenter.onPlayerAvailable { [weak self] player in
             // Log only the cache filename, never the full ~/.cache path (username PII).
