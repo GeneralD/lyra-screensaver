@@ -26,14 +26,24 @@ final class LyraScreenSaverView: ScreenSaverView {
 
     /// Guards `startPresenting()` / `stopPresenting()` so the presenter is
     /// started and torn down at most once per cycle. `legacyScreenSaver` can
-    /// deliver overlapping lifecycle callbacks, and our `viewDidMoveToWindow`
-    /// fallback races `stopAnimation()`, so both transitions must be idempotent.
+    /// deliver overlapping lifecycle callbacks, and both `viewDidMoveToWindow`
+    /// and the occlusion observer race `stopAnimation()`, so every transition
+    /// must be idempotent.
     private var isPresenting = false
+
+    /// Observes the host window's occlusion state. Registered on window attach
+    /// and removed on detach, so it survives start/stop cycles and can resume
+    /// playback when the saver becomes visible again.
+    private var occlusionObserver: NSObjectProtocol?
 
     override init?(frame: NSRect, isPreview: Bool) {
         Self.redirectXDGToRealHome()
         super.init(frame: frame, isPreview: isPreview)
         configureLayerHierarchy()
+        // AVPlayerLayer renders via Core Animation, so the ScreenSaver frame
+        // timer is dead weight — disable it (mirrors the standalone
+        // VideoScreenSaver); animateOneFrame() is overridden as a no-op.
+        animationTimeInterval = .greatestFiniteMagnitude
         // Presenter binding is deferred to startPresenting() so it re-subscribes
         // on every start (stop() clears the presenter's subscriptions), keeping
         // resume after a fallback teardown working.
@@ -55,17 +65,21 @@ final class LyraScreenSaverView: ScreenSaverView {
     }
 
     /// `legacyScreenSaver` frequently keeps the view alive on dismissal without
-    /// calling `stopAnimation()`, leaving the presenter (and its video decoder)
-    /// running indefinitely — the root cause of issue #2. Detaching from the
-    /// window is the reliable dismissal signal, so tear down here as a fallback.
+    /// calling `stopAnimation()` (issue #2). Two fallbacks cover that: detaching
+    /// from the window here, and — when the host only hides the window instead
+    /// of detaching the view — the occlusion observer registered below.
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
-        guard window == nil else {
-            Self.log.info("viewDidMoveToWindow: window attached")
+        guard let window else {
+            removeOcclusionObserver()
+            stopPresenting(trigger: "viewDidMoveToWindow")
             return
         }
-        stopPresenting(trigger: "viewDidMoveToWindow")
+        observeOcclusion(on: window)
     }
+
+    // AVPlayerLayer self-renders; the ScreenSaver frame tick does nothing.
+    override func animateOneFrame() {}
 
     override func layout() {
         super.layout()
@@ -100,6 +114,39 @@ private extension LyraScreenSaverView {
         Self.log.info("stopPresenting(\(trigger, privacy: .public)): stopping presenter + detaching player layer")
         presenter.stop()
         playerLayer.player = nil
+    }
+
+    /// Drive playback from the host window's occlusion state. `legacyScreenSaver`
+    /// may hide the saver's window on dismissal without detaching the view or
+    /// calling `stopAnimation()`, in which case occlusion is the *only* signal —
+    /// so a non-visible window tears playback down and a visible one resumes it.
+    /// Mirrors the standalone VideoScreenSaver, adapted to drive the idempotent
+    /// start/stop pair: the presenter owns playback, so pausing the raw player
+    /// alone would be undone by its item-advance logic.
+    func observeOcclusion(on window: NSWindow) {
+        guard occlusionObserver == nil else { return }
+        occlusionObserver = NotificationCenter.default.addObserver(
+            forName: NSWindow.didChangeOcclusionStateNotification,
+            object: window, queue: .main
+        ) { [weak self] note in
+            guard let self, let changed = note.object as? NSWindow else { return }
+            let visible = changed.occlusionState.contains(.visible)
+            // Delivered on .main, so we are already on the main actor's executor.
+            MainActor.assumeIsolated { [self] in occlusionDidChange(visible: visible) }
+        }
+    }
+
+    func occlusionDidChange(visible: Bool) {
+        guard visible else {
+            stopPresenting(trigger: "occlusion")
+            return
+        }
+        startPresenting()
+    }
+
+    func removeOcclusionObserver() {
+        occlusionObserver.map(NotificationCenter.default.removeObserver)
+        occlusionObserver = nil
     }
 
     func configureLayerHierarchy() {
