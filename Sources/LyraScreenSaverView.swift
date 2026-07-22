@@ -32,16 +32,16 @@ final class LyraScreenSaverView: ScreenSaverView {
     private var isPresenting = false
 
     /// Observes the host window's occlusion state. Registered on window attach
-    /// and removed on detach, so it survives start/stop cycles and can resume
-    /// playback when the saver becomes visible again.
+    /// and removed on detach; a non-visible window is a teardown signal only
+    /// (see `occlusionDidChange`).
     private var occlusionObserver: NSObjectProtocol?
 
     /// Whether the host wants the saver running (set by `startAnimation()`,
-    /// cleared by `stopAnimation()`). Gates the *resume* paths so visibility or
-    /// reattachment alone can never restart playback after the host has stopped
-    /// the saver — e.g. a covered/uncovered System Settings preview must stay
-    /// idle, not re-spin the decoder. Teardown paths ignore it (stopping is
-    /// always safe).
+    /// cleared by `stopAnimation()`). Gates the reattach resume path so a view
+    /// reparented after a stop stays idle instead of restarting. Occlusion
+    /// cannot resume at all (it is teardown-only), so visibility alone never
+    /// restarts playback. Teardown paths ignore the flag; stopping is always
+    /// safe.
     private var hostRequestedPlayback = false
 
     override init?(frame: NSRect, isPreview: Bool) {
@@ -131,14 +131,16 @@ private extension LyraScreenSaverView {
         playerLayer.player = nil
     }
 
-    /// Drive playback from the host window's occlusion state. `legacyScreenSaver`
-    /// may hide the saver's window on dismissal without detaching the view or
-    /// calling `stopAnimation()`, in which case occlusion is the *only* signal —
-    /// so a non-visible window tears playback down, and a visible one resumes it
-    /// only while `hostRequestedPlayback` still holds. Mirrors the standalone
-    /// VideoScreenSaver, adapted to drive the idempotent start/stop pair: the
-    /// presenter owns playback, so pausing the raw player alone would be undone
-    /// by its item-advance logic.
+    /// Tear playback down when the host window becomes non-visible.
+    /// `legacyScreenSaver` may dismiss the saver by hiding its window without
+    /// detaching the view or calling `stopAnimation()`, so occlusion is often
+    /// the *only* teardown signal. It is deliberately teardown-only: a later
+    /// visible transition on a retained (possibly already-dismissed) window must
+    /// not resume playback — that would re-spin the very decoder this releases
+    /// (issue #2), since the dismissal path leaves `hostRequestedPlayback` set.
+    /// Resuming is the host's job via `startAnimation()`. Full stop rather than a
+    /// raw `player.pause()` because the presenter owns playback and its
+    /// item-advance logic would otherwise undo a bare pause.
     func observeOcclusion(on window: NSWindow) {
         guard occlusionObserver == nil else { return }
         occlusionObserver = NotificationCenter.default.addObserver(
@@ -153,15 +155,11 @@ private extension LyraScreenSaverView {
     }
 
     func occlusionDidChange(visible: Bool) {
-        guard visible else {
-            stopPresenting(trigger: "occlusion")
-            return
-        }
-        // Resume only while the host still wants playback: a visible transition
-        // must not restart a saver the host has already stopped (issue #2 — a
-        // covered/uncovered preview would otherwise re-spin the decoder).
-        guard hostRequestedPlayback else { return }
-        startPresenting()
+        // Teardown-only (see observeOcclusion): stop when hidden, never resume
+        // on visible — the host's startAnimation() is the only occlusion-era
+        // resume path.
+        guard !visible else { return }
+        stopPresenting(trigger: "occlusion")
     }
 
     func removeOcclusionObserver() {
