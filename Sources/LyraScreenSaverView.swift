@@ -24,11 +24,37 @@ final class LyraScreenSaverView: ScreenSaverView {
     private lazy var presenter = WallpaperPresenter()
     private let playerLayer = AVPlayerLayer()
 
+    /// Guards `startPresenting()` / `stopPresenting()` so the presenter is
+    /// started and torn down at most once per cycle. `legacyScreenSaver` can
+    /// deliver overlapping lifecycle callbacks, and both `viewDidMoveToWindow`
+    /// and the occlusion observer race `stopAnimation()`, so every transition
+    /// must be idempotent.
+    private var isPresenting = false
+
+    /// Observes the host window's occlusion state. Registered on window attach
+    /// and removed on detach; a non-visible window is a teardown signal only
+    /// (see `occlusionDidChange`).
+    private var occlusionObserver: NSObjectProtocol?
+
+    /// Whether the host wants the saver running (set by `startAnimation()`,
+    /// cleared by `stopAnimation()`). Gates the reattach resume path so a view
+    /// reparented after a stop stays idle instead of restarting. Occlusion
+    /// cannot resume at all (it is teardown-only), so visibility alone never
+    /// restarts playback. Teardown paths ignore the flag; stopping is always
+    /// safe.
+    private var hostRequestedPlayback = false
+
     override init?(frame: NSRect, isPreview: Bool) {
         Self.redirectXDGToRealHome()
         super.init(frame: frame, isPreview: isPreview)
         configureLayerHierarchy()
-        bindPresenter()
+        // AVPlayerLayer renders via Core Animation, so the ScreenSaver frame
+        // timer is dead weight — disable it (mirrors the standalone
+        // VideoScreenSaver); animateOneFrame() is overridden as a no-op.
+        animationTimeInterval = .greatestFiniteMagnitude
+        // Presenter binding is deferred to startPresenting() so it re-subscribes
+        // on every start (stop() clears the presenter's subscriptions), keeping
+        // resume after a fallback teardown working.
     }
 
     @available(*, unavailable)
@@ -37,15 +63,38 @@ final class LyraScreenSaverView: ScreenSaverView {
     }
 
     override func startAnimation() {
+        hostRequestedPlayback = true
         super.startAnimation()
-        Self.log.info("startAnimation: starting presenter")
-        presenter.start()
+        startPresenting()
     }
 
     override func stopAnimation() {
-        presenter.stop()
+        hostRequestedPlayback = false
+        stopPresenting(trigger: "stopAnimation")
         super.stopAnimation()
     }
+
+    /// `legacyScreenSaver` frequently keeps the view alive on dismissal without
+    /// calling `stopAnimation()` (issue #2). Two fallbacks cover that: detaching
+    /// from the window here, and — when the host only hides the window instead
+    /// of detaching the view — the occlusion observer registered below.
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        guard let window else {
+            removeOcclusionObserver()
+            stopPresenting(trigger: "viewDidMoveToWindow")
+            return
+        }
+        observeOcclusion(on: window)
+        // Reattach (AppKit reparenting / view reuse) may not be followed by
+        // another startAnimation(); resume here so an active view that was
+        // reparented doesn't come back black — but only while the host still
+        // wants playback, so a view reattached after a stop stays idle.
+        if hostRequestedPlayback { startPresenting() }
+    }
+
+    // AVPlayerLayer self-renders; the ScreenSaver frame tick does nothing.
+    override func animateOneFrame() {}
 
     override func layout() {
         super.layout()
@@ -58,6 +107,66 @@ final class LyraScreenSaverView: ScreenSaverView {
 }
 
 private extension LyraScreenSaverView {
+    /// Idempotent start: (re)subscribe the presenter callbacks and begin
+    /// playback. Safe to call repeatedly — the `isPresenting` guard collapses
+    /// duplicate host callbacks, and rebinding is required because a prior
+    /// `stopPresenting()` cleared the presenter's subscriptions.
+    func startPresenting() {
+        guard !isPresenting else { return }
+        isPresenting = true
+        Self.log.info("startPresenting: binding + starting presenter")
+        bindPresenter()
+        presenter.start()
+    }
+
+    /// Idempotent teardown. Beyond stopping the presenter (which nils out its
+    /// own AVPlayer), detach the player from the layer: the layer holds the only
+    /// remaining strong reference to the presenter's AVPlayer, so without this
+    /// the instance — and its warm video decoder — survives the stop (issue #2).
+    func stopPresenting(trigger: String) {
+        guard isPresenting else { return }
+        isPresenting = false
+        Self.log.info("stopPresenting(\(trigger, privacy: .public)): stopping presenter + detaching player layer")
+        presenter.stop()
+        playerLayer.player = nil
+    }
+
+    /// Tear playback down when the host window becomes non-visible.
+    /// `legacyScreenSaver` may dismiss the saver by hiding its window without
+    /// detaching the view or calling `stopAnimation()`, so occlusion is often
+    /// the *only* teardown signal. It is deliberately teardown-only: a later
+    /// visible transition on a retained (possibly already-dismissed) window must
+    /// not resume playback — that would re-spin the very decoder this releases
+    /// (issue #2), since the dismissal path leaves `hostRequestedPlayback` set.
+    /// Resuming is the host's job via `startAnimation()`. Full stop rather than a
+    /// raw `player.pause()` because the presenter owns playback and its
+    /// item-advance logic would otherwise undo a bare pause.
+    func observeOcclusion(on window: NSWindow) {
+        guard occlusionObserver == nil else { return }
+        occlusionObserver = NotificationCenter.default.addObserver(
+            forName: NSWindow.didChangeOcclusionStateNotification,
+            object: window, queue: .main
+        ) { [weak self] note in
+            guard let self, let changed = note.object as? NSWindow else { return }
+            let visible = changed.occlusionState.contains(.visible)
+            // Delivered on .main, so we are already on the main actor's executor.
+            MainActor.assumeIsolated { [self] in occlusionDidChange(visible: visible) }
+        }
+    }
+
+    func occlusionDidChange(visible: Bool) {
+        // Teardown-only (see observeOcclusion): stop when hidden, never resume
+        // on visible — the host's startAnimation() is the only occlusion-era
+        // resume path.
+        guard !visible else { return }
+        stopPresenting(trigger: "occlusion")
+    }
+
+    func removeOcclusionObserver() {
+        occlusionObserver.map(NotificationCenter.default.removeObserver)
+        occlusionObserver = nil
+    }
+
     func configureLayerHierarchy() {
         wantsLayer = true
         layer?.backgroundColor = NSColor.black.cgColor
@@ -66,8 +175,10 @@ private extension LyraScreenSaverView {
         layer?.addSublayer(playerLayer)
     }
 
-    /// Mirrors lyra's `AppWindow`: register once, attach the stable `AVPlayer`
-    /// instance the presenter keeps across item swaps, and track per-item zoom.
+    /// Mirrors lyra's `AppWindow`: attach the stable `AVPlayer` instance the
+    /// presenter keeps across item swaps, and track per-item zoom. Re-registered
+    /// on every `startPresenting()` — `stopPresenting()` clears the presenter's
+    /// subscriptions, so a fresh binding is needed to resume after a teardown.
     func bindPresenter() {
         presenter.onPlayerAvailable { [weak self] player in
             // Log only the cache filename, never the full ~/.cache path (username PII).
